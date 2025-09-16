@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hybrid Matching — Nestdore + Date Filter</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root { --bg:#0b1020; --card:#0f162e; --muted:#9aa4bd; --accent:#4f7cff; --accent2:#00d4ff; --border:#1d2440; }
+    body{ margin:0; padding:24px; font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+      background: radial-gradient(1000px 600px at 10% -20%, rgba(79,124,255,.25), transparent),
+                  radial-gradient(1000px 600px at 120% 0%, rgba(0,212,255,.18), transparent),
+                  var(--bg); color:#e6ecff }
+    h1{ font-size:1.9rem; margin:0 0 8px }
+    h1 span{ background:linear-gradient(90deg,var(--accent),var(--accent2)); -webkit-background-clip:text; background-clip:text; color:transparent }
+    .container{ max-width:1100px; margin:0 auto; display:flex; flex-direction:column; gap:16px }
+    .panel{ background:var(--card); border:1px solid var(--border); border-radius:14px; padding:14px; box-shadow:0 10px 30px rgba(0,0,0,.25) }
+    .controls{ display:flex; gap:10px; flex-wrap:wrap; align-items:center }
+    .grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:14px }
+    .row{ display:flex; justify-content:space-between; align-items:center; gap:12px }
+    .badge{ display:inline-block; padding:2px 8px; border-radius:999px; font-size:.8rem; background:#0b1330; border:1px solid var(--border); color:#c5d0ff }
+    .small{ color:var(--muted); font-size:.9rem }
+    input,select,button{ padding:10px 12px; border-radius:10px; border:1px solid var(--border); background:#0b1330; color:#e6ecff }
+    input[type="date"]{ min-width:180px }
+    input[type="range"]{ width:220px }
+    button{ background:linear-gradient(90deg,var(--accent),var(--accent2)); border:none; color:#0b1020; font-weight:800; cursor:pointer }
+    button:disabled{ opacity:.6; cursor:not-allowed }
+    .card{ background:linear-gradient(180deg,#111a38,#0f162e); border:1px solid var(--border); border-radius:14px; padding:14px;
+           box-shadow:inset 0 1px 0 rgba(255,255,255,.03),0 10px 20px rgba(0,0,0,.25) }
+    .title{ font-weight:700; letter-spacing:.2px }
+    .subtitle{ color:var(--muted); font-size:.95rem }
+    .scores{ display:flex; gap:10px; flex-wrap:wrap }
+    .reasons{ margin-top:10px; padding-left:18px; color:#c9d6ff }
+    .hint{ opacity:.8 }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="panel">
+      <h1><span>Hybrid Matching — Supabase RPC</span></h1>
+      <p class="small">Pick a source entity, a target date, and blend <b>Vector</b> + <b>Rules</b>. Date filter applies after ranking.</p>
+      <div class="controls" style="margin-top:8px">
+        <label class="small">Mode<br/>
+          <select id="mode">
+            <option value="user->landlords">User → Landlords</option>
+            <option value="landlord->users">Landlord → Users</option>
+          </select>
+        </label>
+        <label class="small" id="entityLabel">User<br/>
+          <select id="entity"></select>
+        </label>
+        <label class="small">Date<br/>
+          <input id="date" type="date" />
+        </label>
+        <label class="small">Blend<br/>
+          <input id="weight" type="range" min="0" max="1" step="0.01" value="0.7" />
+        </label>
+        <span class="badge">Vector <span id="vPct">70</span>%</span>
+        <span class="badge">Rules <span id="rPct">30</span>%</span>
+        <button id="runBtn" disabled>Run Matching</button>
+      </div>
+      <div class="small hint" id="dateHint" style="margin-top:6px">
+        In <b>User → Landlords</b>, we keep listings with <code>availability_date ≤ picked date</code>.
+      </div>
+    </div>
+
+    <div id="results" class="grid"></div>
+  </div>
+
+  <script type="module">
+    import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+    // Your env (from earlier)
+    const SUPABASE_URL  = 'https://zhbqjlhjxpytbjwrqegc.supabase.co';
+    const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpoYnFqbGhqeHB5dGJqd3JxZWdjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc0NDM5MzcsImV4cCI6MjA3MzAxOTkzN30.EjPuhA4cj1l-PeV-hO6WnOdEyoQovZmkYSqv0tPTlTU';
+
+    const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
+
+    const modeSel   = document.getElementById('mode');
+    const entitySel = document.getElementById('entity');
+    const entityLab = document.getElementById('entityLabel');
+    const dateInp   = document.getElementById('date');
+    const runBtn    = document.getElementById('runBtn');
+    const results   = document.getElementById('results');
+    const weight    = document.getElementById('weight');
+    const vPct      = document.getElementById('vPct');
+    const rPct      = document.getElementById('rPct');
+    const dateHint  = document.getElementById('dateHint');
+
+    const pct = (x)=> Math.round((Number(x)||0)*100);
+
+    function updateBlend(){
+      const v = Number(weight.value);
+      vPct.textContent = pct(v);
+      rPct.textContent = 100 - pct(v);
+    }
+    function updateModeLabel(){
+      const isUserMode = modeSel.value === 'user->landlords';
+      entityLab.firstChild.nodeValue = (isUserMode ? 'User' : 'Landlord') + '\\n';
+      dateHint.innerHTML = isUserMode
+        ? `In <b>User → Landlords</b>, we keep listings with <code>availability_date ≤ picked date</code>.`
+        : `In <b>Landlord → Users</b>, we keep seekers with <code>move_in_date ≥ picked date</code>.`;
+    }
+
+    async function loadOptions(){
+      const table = modeSel.value === 'user->landlords' ? 'users' : 'landlords';
+      const { data, error } = await sb.from(table).select('id,name,email').order('created_at',{ascending:false});
+      if(error){ alert('Load error: '+error.message); return; }
+      entitySel.innerHTML = '<option value="">-- choose --</option>';
+      (data||[]).forEach(r=>{
+        const o = document.createElement('option');
+        o.value = r.id; o.textContent = `${r.name} (${r.id})`;
+        entitySel.appendChild(o);
+      });
+      runBtn.disabled = !entitySel.value;
+    }
+
+    function cardHTML(title, subtitle, vScore, rScore, tScore, extraDateLabel, extraDateValue, reasons){
+      const badges = `
+        <span class="badge">Vector ${pct(vScore)}%</span>
+        <span class="badge">Rules ${pct(rScore)}%</span>
+        <span class="badge">Final ${pct(tScore)}%</span>`;
+      const extra = extraDateValue ? `<div class="small" style="margin-top:6px">${extraDateLabel}: <b>${extraDateValue}</b></div>` : '';
+      const rs = (reasons && reasons.length) ? `<ul class="reasons">${reasons.map(r=>`<li>• ${r}</li>`).join('')}</ul>` : '';
+      return `
+        <div class="card">
+          <div class="row">
+            <div>
+              <div class="title">${title}</div>
+              ${subtitle ? `<div class="subtitle">${subtitle}</div>` : ''}
+            </div>
+            <div class="scores">${badges}</div>
+          </div>
+          ${extra}
+          ${rs}
+        </div>`;
+    }
+
+    async function runMatching(){
+      if(!entitySel.value){ return; }
+      results.innerHTML = '';
+      runBtn.disabled = true;
+      const v = Number(weight.value), r = 1 - v;
+      const picked = dateInp.value ? new Date(dateInp.value) : null;
+
+      try{
+        if(modeSel.value === 'user->landlords'){
+          // 1) RPC
+          const { data, error } = await sb.rpc('match_landlords_for_user', {
+            p_user_id: entitySel.value, p_top_k: 50, p_w_vector: v, p_w_rules: r
+          });
+          if(error) throw error;
+
+          // 2) Fetch availability_date for returned landlords
+          const ids = (data||[]).map(x=>x.landlord_id);
+          let meta = {};
+          if(ids.length){
+            const { data: rows, error: e2 } = await sb
+              .from('landlords')
+              .select('id,availability_date')
+              .in('id', ids);
+            if(e2) throw e2;
+            rows.forEach(x=>{ meta[x.id] = x.availability_date; });
+          }
+
+          // 3) Optional date filter (availability_date ≤ picked date)
+          let items = (data||[]).map(row => ({
+            id: row.landlord_id,
+            title: row.landlord_name,
+            email: row.landlord_email,
+            vScore: row.vector_score,
+            rScore: row.rule_score,
+            tScore: row.total_score,
+            date: meta[row.landlord_id] || null
+          }));
+          if(picked){
+            items = items.filter(x => x.date && new Date(x.date) <= picked);
+          }
+
+          // 4) Render
+          if(!items.length){
+            results.innerHTML = '<div class="panel small">No matches for the selected date.</div>';
+          }else{
+            results.innerHTML = items.map(x =>
+              cardHTML(x.title, x.email, x.vScore, x.rScore, x.tScore, 'Availability', x.date, (data.find(d=>d.landlord_id===x.id)?.reasons)||[])
+            ).join('');
+          }
+
+        } else {
+          // landlord->users
+          const { data, error } = await sb.rpc('match_users_for_landlord', {
+            p_landlord_id: entitySel.value, p_top_k: 50, p_w_vector: v, p_w_rules: r
+          });
+          if(error) throw error;
+
+          // Fetch move_in_date for returned users
+          const ids = (data||[]).map(x=>x.user_id);
+          let meta = {};
+          if(ids.length){
+            const { data: rows, error: e2 } = await sb
+              .from('users')
+              .select('id,move_in_date')
+              .in('id', ids);
+            if(e2) throw e2;
+            rows.forEach(x=>{ meta[x.id] = x.move_in_date; });
+          }
+
+          // Optional date filter (move_in_date ≥ picked date)
+          let items = (data||[]).map(row => ({
+            id: row.user_id,
+            title: row.user_name,
+            email: row.user_email,
+            vScore: row.vector_score,
+            rScore: row.rule_score,
+            tScore: row.total_score,
+            date: meta[row.user_id] || null
+          }));
+          if(picked){
+            items = items.filter(x => x.date && new Date(x.date) >= picked);
+          }
+
+          if(!items.length){
+            results.innerHTML = '<div class="panel small">No matches for the selected date.</div>';
+          }else{
+            results.innerHTML = items.map(x =>
+              cardHTML(x.title, x.email, x.vScore, x.rScore, x.tScore, 'Move-in', x.date, (data.find(d=>d.user_id===x.id)?.reasons)||[])
+            ).join('');
+          }
+        }
+      } catch (e){
+        alert('Match error: ' + (e.message || e));
+      } finally {
+        runBtn.disabled = !entitySel.value;
+      }
+    }
+
+    // Events & init
+    weight.addEventListener('input', updateBlend);
+    modeSel.addEventListener('change', async () => { updateModeLabel(); await loadOptions(); });
+    entitySel.addEventListener('change', () => { runBtn.disabled = !entitySel.value; });
+    runBtn.addEventListener('click', runMatching);
+
+    updateBlend();
+    updateModeLabel();
+    await loadOptions();
+  </script>
+</body>
+</html>
